@@ -8,27 +8,50 @@ console.log(`WebSocket proxy running on port ${PORT}`);
 wss.on('connection', (clientSocket, req) => {
   console.log('Client connected from browser. Forwarding to target server...');
 
-  // Connect to the actual backend server
-  const serverSocket = new WebSocket('wss://playblockpost.com:41999', {
-    perMessageDeflate: false, // Disable compression overhead to prevent latency drops
-    rejectUnauthorized: false // Ignore SSL cert discrepancies between proxy and backend
+  // Extract subprotocols if Unity requested any (e.g., binary, photon, etc.)
+  const protocols = req.headers['sec-websocket-protocol']
+    ? req.headers['sec-websocket-protocol'].split(',').map(s => s.trim())
+    : undefined;
+
+  // Queue to store incoming packets while connecting to the target server
+  const messageQueue = [];
+
+  const serverSocket = new WebSocket('wss://playblockpost.com:41999', protocols, {
+    perMessageDeflate: false,
+    rejectUnauthorized: false,
+    headers: {
+      'User-Agent': req.headers['user-agent'] || '',
+      'Origin': req.headers['origin'] || 'https://playblockpost.com'
+    }
   });
 
-  // Relay raw binary packets from Browser -> Game Server
-  clientSocket.on('message', (data, isBinary) => {
-    if (serverSocket.readyState === WebSocket.OPEN) {
+  // Flush queued messages once the target connection is ready
+  serverSocket.on('open', () => {
+    console.log('Connected to target backend. Flushing queue...');
+    while (messageQueue.length > 0) {
+      const { data, isBinary } = messageQueue.shift();
       serverSocket.send(data, { binary: isBinary });
     }
   });
 
-  // Relay raw binary packets from Game Server -> Browser
+  // Relay Browser -> Target Server (with queue support)
+  clientSocket.on('message', (data, isBinary) => {
+    if (serverSocket.readyState === WebSocket.OPEN) {
+      serverSocket.send(data, { binary: isBinary });
+    } else if (serverSocket.readyState === WebSocket.CONNECTING) {
+      // Store packet so Unity's join handshake isn't lost
+      messageQueue.push({ data, isBinary });
+    }
+  });
+
+  // Relay Target Server -> Browser
   serverSocket.on('message', (data, isBinary) => {
     if (clientSocket.readyState === WebSocket.OPEN) {
       clientSocket.send(data, { binary: isBinary });
     }
   });
 
-  // Relay Ping/Pong Heartbeats to prevent timeouts
+  // Ping / Pong relaying
   clientSocket.on('ping', (data) => {
     if (serverSocket.readyState === WebSocket.OPEN) serverSocket.ping(data);
   });
@@ -46,7 +69,7 @@ wss.on('connection', (clientSocket, req) => {
   // Clean handling of disconnections & errors
   clientSocket.on('close', () => serverSocket.close());
   serverSocket.on('close', () => clientSocket.close());
-  
+
   clientSocket.on('error', (err) => console.error('Browser socket error:', err.message));
   serverSocket.on('error', (err) => console.error('Target server error:', err.message));
 });
