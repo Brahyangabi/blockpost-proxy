@@ -1,37 +1,52 @@
 const WebSocket = require('ws');
 
-// Render sets the PORT environment variable automatically
 const PORT = process.env.PORT || 10000;
 const wss = new WebSocket.Server({ port: PORT });
 
 console.log(`WebSocket proxy running on port ${PORT}`);
 
-wss.on('connection', (clientSocket) => {
-  console.log('Client connected. Forwarding to Blockpost server...');
+wss.on('connection', (clientSocket, req) => {
+  console.log('Client connected from browser. Forwarding to target server...');
 
-  // Connect directly to the game server on port 41999
-  const serverSocket = new WebSocket('wss://playblockpost.com:41999');
-
-  serverSocket.on('open', () => {
-    console.log('Connected to target game server!');
+  // Connect to the actual backend server
+  const serverSocket = new WebSocket('wss://playblockpost.com:41999', {
+    perMessageDeflate: false, // Disable compression overhead to prevent latency drops
+    rejectUnauthorized: false // Ignore SSL cert discrepancies between proxy and backend
   });
 
-  // Relay data: Browser -> Game Server
-  clientSocket.on('message', (data) => {
+  // Relay raw binary packets from Browser -> Game Server
+  clientSocket.on('message', (data, isBinary) => {
     if (serverSocket.readyState === WebSocket.OPEN) {
-      serverSocket.send(data);
+      serverSocket.send(data, { binary: isBinary });
     }
   });
 
-  // Relay data: Game Server -> Browser
-  serverSocket.on('message', (data) => {
+  // Relay raw binary packets from Game Server -> Browser
+  serverSocket.on('message', (data, isBinary) => {
     if (clientSocket.readyState === WebSocket.OPEN) {
-      clientSocket.send(data);
+      clientSocket.send(data, { binary: isBinary });
     }
   });
 
+  // Relay Ping/Pong Heartbeats to prevent timeouts
+  clientSocket.on('ping', (data) => {
+    if (serverSocket.readyState === WebSocket.OPEN) serverSocket.ping(data);
+  });
+  serverSocket.on('ping', (data) => {
+    if (clientSocket.readyState === WebSocket.OPEN) clientSocket.ping(data);
+  });
+
+  clientSocket.on('pong', (data) => {
+    if (serverSocket.readyState === WebSocket.OPEN) serverSocket.pong(data);
+  });
+  serverSocket.on('pong', (data) => {
+    if (clientSocket.readyState === WebSocket.OPEN) clientSocket.pong(data);
+  });
+
+  // Clean handling of disconnections & errors
   clientSocket.on('close', () => serverSocket.close());
   serverSocket.on('close', () => clientSocket.close());
-  clientSocket.on('error', (err) => console.error('Client error:', err));
-  serverSocket.on('error', (err) => console.error('Target server error:', err));
+  
+  clientSocket.on('error', (err) => console.error('Browser socket error:', err.message));
+  serverSocket.on('error', (err) => console.error('Target server error:', err.message));
 });
