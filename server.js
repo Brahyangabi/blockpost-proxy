@@ -9,7 +9,7 @@ wss.on('connection', (clientSocket, req) => {
   console.log('Client connected from browser. Forwarding to target server...');
 
   // Connect to the actual backend server
-  const serverSocket = new WebSocket('ws://playblockpost.com:41999', {
+  const serverSocket = new WebSocket('wss://playblockpost.com:41999', {
     perMessageDeflate: false, // Disable compression overhead to prevent latency drops
     rejectUnauthorized: false // Ignore SSL cert discrepancies between proxy and backend
   });
