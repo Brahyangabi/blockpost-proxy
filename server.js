@@ -1,72 +1,55 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const url = require('url');
+const http = require('http');
+const https = require('https');
 
 const app = express();
-const PORT = process.env.PORT || 10000;
 
-// Health check endpoint for Render
-app.get('/', (req, res) => res.send('WebSocket Proxy Running'));
+// Disable Express metadata overhead
+app.disable('x-powered-by');
+app.disable('etag');
 
-const server = app.listen(PORT, () => {
-  console.log(`Dynamic Proxy running on port ${PORT}`);
+// Optimize HTTP/HTTPS agents for real-time WebSocket traffic
+const agentOptions = {
+  keepAlive: true,
+  keepAliveMsecs: 10000,
+  noDelay: true // Disables Nagle's algorithm for faster packet dispatch
+};
+
+const httpAgent = new http.Agent(agentOptions);
+const httpsAgent = new https.Agent(agentOptions);
+
+// Ultra-lean proxy middleware
+const wsProxy = createProxyMiddleware({
+  target: 'wss://playblockpost.com:41999', // Default fallback
+  router: (req) => {
+    // Extract target from query string (?target=wss://...)
+    return req.query.target || undefined;
+  },
+  ws: true,
+  changeOrigin: true,
+  logLevel: 'silent', // STOP console logging to prevent thread blocking
+  agent: httpAgent,
+  agentOptions: { https: httpsAgent },
+  onError: (err, req, res) => {
+    // Silent fail to avoid throwing heavy stack traces during network hiccups
+    if (res && !res.headersSent) {
+      res.writeHead(502);
+      res.end('Proxy Error');
+    }
+  }
 });
 
-const WebSocket = require('ws');
-const wss = new WebSocket.Server({ noServer: true });
+// Pass all traffic directly into the proxy
+app.use('/', wsProxy);
 
-server.on('upgrade', (request, socket, head) => {
-  const parsedUrl = url.parse(request.url, true);
-  const targetUrl = parsedUrl.query.target;
+const server = app.listen(process.env.PORT || 3000);
 
-  if (!targetUrl) {
-    socket.destroy();
-    return;
-  }
-
-  wss.handleUpgrade(request, socket, head, (clientSocket) => {
-    console.log(`Forwarding connection to target: ${targetUrl}`);
-
-    const protocols = request.headers['sec-websocket-protocol']
-      ? request.headers['sec-websocket-protocol'].split(',').map(s => s.trim())
-      : undefined;
-
-    const messageQueue = [];
-
-    const serverSocket = new WebSocket(targetUrl, protocols, {
-      perMessageDeflate: false,
-      rejectUnauthorized: false,
-      headers: {
-        'User-Agent': request.headers['user-agent'] || '',
-        'Origin': 'https://playblockpost.com'
-      }
-    });
-
-    serverSocket.on('open', () => {
-      while (messageQueue.length > 0) {
-        const { data, isBinary } = messageQueue.shift();
-        serverSocket.send(data, { binary: isBinary });
-      }
-    });
-
-    clientSocket.on('message', (data, isBinary) => {
-      if (serverSocket.readyState === WebSocket.OPEN) {
-        serverSocket.send(data, { binary: isBinary });
-      } else if (serverSocket.readyState === WebSocket.CONNECTING) {
-        messageQueue.push({ data, isBinary });
-      }
-    });
-
-    serverSocket.on('message', (data, isBinary) => {
-      if (clientSocket.readyState === WebSocket.OPEN) {
-        clientSocket.send(data, { binary: isBinary });
-      }
-    });
-
-    clientSocket.on('close', () => serverSocket.close());
-    serverSocket.on('close', () => clientSocket.close());
-
-    clientSocket.on('error', () => {});
-    serverSocket.on('error', () => {});
-  });
+// Fast upgrade handler for WebSockets
+server.on('upgrade', (req, socket, head) => {
+  // Set TCP socket options immediately on incoming browser connection
+  socket.setNoDelay(true);
+  socket.setKeepAlive(true, 10000);
+  
+  wsProxy.upgrade(req, socket, head);
 });
