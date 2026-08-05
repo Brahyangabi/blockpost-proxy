@@ -13,13 +13,13 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocket.Server({ 
   noServer: true,
-  perMessageDeflate: false 
+  perMessageDeflate: false // Prevents CPU compression lag spikes
 });
 
 server.on('upgrade', (request, socket, head) => {
-  // Disable Nagle's Algorithm on client TCP stream
+  // Disable Nagle's algorithm on incoming client connection
   socket.setNoDelay(true);
-  socket.setKeepAlive(true, 10000);
+  socket.setKeepAlive(true, 5000);
 
   const parsedUrl = url.parse(request.url, true);
   const targetUrl = parsedUrl.query.target;
@@ -30,12 +30,14 @@ server.on('upgrade', (request, socket, head) => {
   }
 
   wss.handleUpgrade(request, socket, head, (clientSocket) => {
+    // Disable Nagle's on the client WebSocket underlying stream
+    if (clientSocket._socket) {
+      clientSocket._socket.setNoDelay(true);
+    }
+
     const protocols = request.headers['sec-websocket-protocol']
       ? request.headers['sec-websocket-protocol'].split(',').map(s => s.trim())
       : undefined;
-
-    let messageQueue = [];
-    const MAX_QUEUE_SIZE = 50; // Prevent runaway memory usage
 
     const serverSocket = new WebSocket(targetUrl, protocols, {
       perMessageDeflate: false,
@@ -46,28 +48,19 @@ server.on('upgrade', (request, socket, head) => {
       }
     });
 
-    // Disable Nagle's Algorithm on outbound target socket
     serverSocket.on('open', () => {
+      // Disable Nagle's on outgoing server stream
       if (serverSocket._socket) {
         serverSocket._socket.setNoDelay(true);
-        serverSocket._socket.setKeepAlive(true, 10000);
+        serverSocket._socket.setKeepAlive(true, 5000);
       }
-
-      // Flush queue
-      for (let i = 0; i < messageQueue.length; i++) {
-        const item = messageQueue[i];
-        serverSocket.send(item.data, { binary: item.isBinary });
-      }
-      messageQueue = null; // Clear queue reference for garbage collection
     });
 
+    // Zero-Buffering Routing: If server isn't open, DROP packet immediately.
+    // Do NOT queue position/input frames—queued old frames cause rubberbanding/ping spikes.
     clientSocket.on('message', (data, isBinary) => {
       if (serverSocket.readyState === WebSocket.OPEN) {
         serverSocket.send(data, { binary: isBinary });
-      } else if (serverSocket.readyState === WebSocket.CONNECTING && messageQueue) {
-        if (messageQueue.length < MAX_QUEUE_SIZE) {
-          messageQueue.push({ data, isBinary });
-        }
       }
     });
 
@@ -77,10 +70,15 @@ server.on('upgrade', (request, socket, head) => {
       }
     });
 
-    clientSocket.on('close', () => serverSocket.close());
-    serverSocket.on('close', () => clientSocket.close());
+    // Immediate cleanup to stop memory leaks
+    const cleanup = () => {
+      try { clientSocket.close(); } catch(e){}
+      try { serverSocket.close(); } catch(e){}
+    };
 
-    clientSocket.on('error', () => {});
-    serverSocket.on('error', () => {});
+    clientSocket.on('close', cleanup);
+    serverSocket.on('close', cleanup);
+    clientSocket.on('error', cleanup);
+    serverSocket.on('error', cleanup);
   });
 });
