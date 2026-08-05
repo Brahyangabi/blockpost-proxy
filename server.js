@@ -31,6 +31,9 @@ server.on('upgrade', (request, socket, head) => {
   }
 
   wss.handleUpgrade(request, socket, head, (clientSocket) => {
+    // Force NoDelay directly on the underlying client socket wrapper
+    if (clientSocket._socket) clientSocket._socket.setNoDelay(true);
+
     const protocols = request.headers['sec-websocket-protocol']
       ? request.headers['sec-websocket-protocol'].split(',').map(s => s.trim())
       : undefined;
@@ -47,6 +50,9 @@ server.on('upgrade', (request, socket, head) => {
     });
 
     serverSocket.on('open', () => {
+      // Force NoDelay on the target TCP connection as soon as it opens
+      if (serverSocket._socket) serverSocket._socket.setNoDelay(true);
+
       // Empty the queue if frames came in while connecting
       while (messageQueue.length > 0) {
         const { data, isBinary } = messageQueue.shift();
