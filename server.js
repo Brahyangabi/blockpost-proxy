@@ -35,6 +35,8 @@ server.on('upgrade', (request, socket, head) => {
       ? request.headers['sec-websocket-protocol'].split(',').map(s => s.trim())
       : undefined;
 
+    const messageQueue = [];
+
     const serverSocket = new WebSocket(targetUrl, protocols, {
       perMessageDeflate: false,
       rejectUnauthorized: false,
@@ -45,17 +47,18 @@ server.on('upgrade', (request, socket, head) => {
     });
 
     serverSocket.on('open', () => {
-      // Set TCP delay options on upstream connection if supported
-      if (serverSocket._socket) {
-        serverSocket._socket.setNoDelay(true);
-        serverSocket._socket.setKeepAlive(true, 10000);
+      // Empty the queue if frames came in while connecting
+      while (messageQueue.length > 0) {
+        const { data, isBinary } = messageQueue.shift();
+        serverSocket.send(data, { binary: isBinary });
       }
     });
 
-    // Pass messages directly without queuing or array buffering
     clientSocket.on('message', (data, isBinary) => {
       if (serverSocket.readyState === WebSocket.OPEN) {
         serverSocket.send(data, { binary: isBinary });
+      } else if (serverSocket.readyState === WebSocket.CONNECTING) {
+        messageQueue.push({ data, isBinary });
       }
     });
 
