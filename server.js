@@ -5,7 +5,6 @@ const WebSocket = require('ws');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Health check endpoint for Render
 app.get('/', (req, res) => res.send('WebSocket Proxy Running'));
 
 const server = app.listen(PORT, () => {
@@ -14,11 +13,11 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocket.Server({ 
   noServer: true,
-  perMessageDeflate: false // Disables compression overhead on server
+  perMessageDeflate: false 
 });
 
 server.on('upgrade', (request, socket, head) => {
-  // Disable Nagle's Algorithm on raw TCP connection for low latency
+  // Disable Nagle's Algorithm on client TCP stream
   socket.setNoDelay(true);
   socket.setKeepAlive(true, 10000);
 
@@ -35,7 +34,8 @@ server.on('upgrade', (request, socket, head) => {
       ? request.headers['sec-websocket-protocol'].split(',').map(s => s.trim())
       : undefined;
 
-    const messageQueue = [];
+    let messageQueue = [];
+    const MAX_QUEUE_SIZE = 50; // Prevent runaway memory usage
 
     const serverSocket = new WebSocket(targetUrl, protocols, {
       perMessageDeflate: false,
@@ -46,19 +46,28 @@ server.on('upgrade', (request, socket, head) => {
       }
     });
 
+    // Disable Nagle's Algorithm on outbound target socket
     serverSocket.on('open', () => {
-      // Empty the queue if frames came in while connecting
-      while (messageQueue.length > 0) {
-        const { data, isBinary } = messageQueue.shift();
-        serverSocket.send(data, { binary: isBinary });
+      if (serverSocket._socket) {
+        serverSocket._socket.setNoDelay(true);
+        serverSocket._socket.setKeepAlive(true, 10000);
       }
+
+      // Flush queue
+      for (let i = 0; i < messageQueue.length; i++) {
+        const item = messageQueue[i];
+        serverSocket.send(item.data, { binary: item.isBinary });
+      }
+      messageQueue = null; // Clear queue reference for garbage collection
     });
 
     clientSocket.on('message', (data, isBinary) => {
       if (serverSocket.readyState === WebSocket.OPEN) {
         serverSocket.send(data, { binary: isBinary });
-      } else if (serverSocket.readyState === WebSocket.CONNECTING) {
-        messageQueue.push({ data, isBinary });
+      } else if (serverSocket.readyState === WebSocket.CONNECTING && messageQueue) {
+        if (messageQueue.length < MAX_QUEUE_SIZE) {
+          messageQueue.push({ data, isBinary });
+        }
       }
     });
 
