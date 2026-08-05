@@ -5,6 +5,7 @@ const WebSocket = require('ws');
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// Health check endpoint for Render
 app.get('/', (req, res) => res.send('WebSocket Proxy Running'));
 
 const server = app.listen(PORT, () => {
@@ -13,13 +14,13 @@ const server = app.listen(PORT, () => {
 
 const wss = new WebSocket.Server({ 
   noServer: true,
-  perMessageDeflate: false // Prevents CPU compression lag spikes
+  perMessageDeflate: false // Disables compression overhead on server
 });
 
 server.on('upgrade', (request, socket, head) => {
-  // Disable Nagle's algorithm on incoming client connection
+  // Disable Nagle's Algorithm on raw TCP connection for low latency
   socket.setNoDelay(true);
-  socket.setKeepAlive(true, 5000);
+  socket.setKeepAlive(true, 10000);
 
   const parsedUrl = url.parse(request.url, true);
   const targetUrl = parsedUrl.query.target;
@@ -30,11 +31,6 @@ server.on('upgrade', (request, socket, head) => {
   }
 
   wss.handleUpgrade(request, socket, head, (clientSocket) => {
-    // Disable Nagle's on the client WebSocket underlying stream
-    if (clientSocket._socket) {
-      clientSocket._socket.setNoDelay(true);
-    }
-
     const protocols = request.headers['sec-websocket-protocol']
       ? request.headers['sec-websocket-protocol'].split(',').map(s => s.trim())
       : undefined;
@@ -49,15 +45,14 @@ server.on('upgrade', (request, socket, head) => {
     });
 
     serverSocket.on('open', () => {
-      // Disable Nagle's on outgoing server stream
+      // Set TCP delay options on upstream connection if supported
       if (serverSocket._socket) {
         serverSocket._socket.setNoDelay(true);
-        serverSocket._socket.setKeepAlive(true, 5000);
+        serverSocket._socket.setKeepAlive(true, 10000);
       }
     });
 
-    // Zero-Buffering Routing: If server isn't open, DROP packet immediately.
-    // Do NOT queue position/input frames—queued old frames cause rubberbanding/ping spikes.
+    // Pass messages directly without queuing or array buffering
     clientSocket.on('message', (data, isBinary) => {
       if (serverSocket.readyState === WebSocket.OPEN) {
         serverSocket.send(data, { binary: isBinary });
@@ -70,15 +65,10 @@ server.on('upgrade', (request, socket, head) => {
       }
     });
 
-    // Immediate cleanup to stop memory leaks
-    const cleanup = () => {
-      try { clientSocket.close(); } catch(e){}
-      try { serverSocket.close(); } catch(e){}
-    };
+    clientSocket.on('close', () => serverSocket.close());
+    serverSocket.on('close', () => clientSocket.close());
 
-    clientSocket.on('close', cleanup);
-    serverSocket.on('close', cleanup);
-    clientSocket.on('error', cleanup);
-    serverSocket.on('error', cleanup);
+    clientSocket.on('error', () => {});
+    serverSocket.on('error', () => {});
   });
 });
